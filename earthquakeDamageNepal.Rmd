@@ -1,0 +1,303 @@
+---
+title: "Clustering and Classification of building damage portfolio after 2015 Earthquake in Nepal"
+subtitle: 'CAS Datenanalyse, ZHAW School of Engineering'
+author: "Amin Karbassi"
+date: "14.07.2021"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.width=11)
+```
+
+## Beschreibung des Datensatz
+
+Nach dem Gorkha-Erdbeben der Stärke 7,8 am 25. April 2015 führte Nepal eine massive Haushaltsbefragung mit mobiler Technologie durch, um Gebäudeschäden in den vom Erdbeben betroffenen Distrikten zu bewerten. Die Daten wurden zwischen Januar 2016 und Mai 2016 erhoben. Weitere Informationen findet man [hier](https://eq2015.npc.gov.np/#/about).
+
+Für dieses Projekt habe ich den Structural-Datensatz verwendet, der Stockwerkstyp, Dachtyp, Fundamenttyp und andere strukturbezogene Informationen für jedes Gebäude zusammen mit dem Schadensniveau enthält. Die Datenbereinigung wurde separat durchgeführt, und der zu bearbeitende Datensatz wurde in einer RData-Datei gespeichert. Es ist zu beachten, dass diese Datei ein Ausschnitt des Originaldatensatzs ist, der über 750000 Beobachtungen enthält. 
+
+```{r Libraries, warning=FALSE, message=FALSE}
+library(cluster)
+library(dplyr)
+library(Rtsne)
+library(ggplot2)
+library(umap)
+library(caret)
+library(rpart)
+library(rattle)
+library(ranger)
+library(vip)
+library(pdp)
+```
+
+### Task 1: Daten einlesen
+
+```{r Dateipfad, echo=FALSE}
+# Dateipfad an den Ort anpassen, an dem die Daten auf dem lokalen Computer gespeichert sind
+path = "/home/proshut/Documents/ZHAW DataAnalysis CAS/Modul C/Leistungsnachweis/Earthquake/"
+
+```
+
+```{r Daten}
+# Dateipfad an den Ort anpassen, an dem die Daten auf dem lokalen Computer gespeichert sind
+# path = "/home..."
+
+load(paste0(path,"EQ_damage_nepal.RData"))
+```
+
+Der Datensatz enthält 3865 Beobachtungen, 26 Features und die Zielvariable ist *damage_grade*. Konkret sind folgende Variablen erfasst:
+
+<div style='width:800px;margin: 0 auto'>
+|Variable | Description | Type 
+|----------------|--------------------------------------
+| building_id             | A unique ID that identifies a unique building from the survey                   | Text
+| count_floors_pre_eq     | Number of floors that the building had before the earthquake                    | Numerical
+| count_floors_diff_ratio | Ration of number of floors change after the earthquake (between 0 and 1)        | Numerical
+| age_building            | Age of the building (in years)                                                  | Numerical
+| plinth_area_sq_ft       | Plinth area of the building (in square feet)                                    | Numerical  
+| height_ft_pre_eq        | Height of the building before the earthquake (in feet)                          | Numerical
+| height_diff_ratio       | Ratio of building height change after the earthquake (between 0 and 1)          | Numerical
+| land_surface_condition  | Surface condition of the land in which the building is built                    | Categorical
+| foundation_type         | Type of foundation used in the building                                         | Categorical
+| roof_type               | Type of roof used in the building                                               | Categorical  
+| ground_floor_type       | Ground floor type                                                               | Categorical  
+| other_floor_type        | Type of construction used in other floors (except ground floor and roof)        | Categorical
+| position                | Position of the building                                                        | Categorical  
+| plan_configuration      | Building plan configuration                                                     | Categorical
+| has_superstructure_...  | Flag variable that indicates if the superstructure of the building is made of...| Boolean
+| damage_grade            | Damage grade assigned by the surveyor after assessment (1 to 5)                 | Categorical
+
+</div>
+
+Wie in der untenstehenden Grafik zu sehen ist, die Zielvariable hat 5 Kategorien, wobei die Anzahl der Beobachtungen in der Zielvariabele ungleichmässig verteilt sind. Nach der Definition der Schadensgrade entspricht Grad 1 einem sehr geringen Schaden und Grad 5 zeigt einen vollständigen Schaden am Gebäude. 
+
+```{r Zielvariable, warning=FALSE, message=FALSE, echo=FALSE}
+barplot(table(EQ_damage_nepal$damage_grade), las=1, xlab = "Damage Grade", ylab = "Anzahl der Beobachtungen", ylim = c(0,2000))
+
+```
+
+Wenn man einige der numerischen Variablen gegen die Zielvariable aufträgt, zeigt sich, dass der Mittelwert dieser Variablen über verschiedene Schadensgrade hinweg nicht sehr stark variiert, obwohl einige Extremwerte zu beobachten sind. 
+
+```{r DatenCheck, warning=FALSE, message=FALSE, echo=FALSE}
+
+par(mfrow=c(1,2), las=1, mar=c(4,4,2,1))
+boxplot(age_building ~ damage_grade, vertical = TRUE, data = EQ_damage_nepal, xlab = "Damage Grade",ylab = "Building Age (years)")
+boxplot(height_ft_pre_eq ~ damage_grade, vertical = TRUE, data = EQ_damage_nepal, xlab = "Damage Grade",ylab = "Building height (ft.)")
+
+
+```
+
+### Task 2: Visualisierung
+
+In Anbetracht dessen, dass im Datensatz gemischte numerische und kategoriale Daten gibt, habe ich als ersten Schritt zur Visualisierung der Daten (Dimensionsreduktion) die Gowers-Matrix für den Datensatz mit der Gower-Methode berechnet. 
+
+```{r Dimensionsreduktion, echo=FALSE}
+gower_dist = as.matrix(daisy(EQ_damage_nepal[,c(-1)] , metric ="gower"))
+```
+
+Für die Visualisierung der Daten wurde hier für die UMAP-Methode entschieden. Zwei wichtige Parameter sind hier *n_neighbors* und *min_dist*, da ihr Wert die Ergebnisse stark beeinflusst. Aus diesem Grund habe ich die umap für verschiedene Werte dieser Parameter ausgeführt, um optimale Werte auszuwählen.
+
+```{r Visualisierung_UMAPc(n_neighbors), echo=TRUE ,warning=FALSE}
+# plotting different values for umap variable n_neighbors
+par(mfrow=c(3,3))
+
+N_cells<-dim(EQ_damage_nepal)[1]
+perp_range<-vector(length=9)
+perp_range[1]<-3; perp_range[9] <- 150
+optPerp <- round((N_cells)^(1/4),0); perp_step = optPerp
+
+for(s in 2:8){perp_range[s]<-round(perp_range[s-1]+perp_step*(s-1)/2,0)}
+for(j in round(perp_range,0)){
+  umap_EQ_damage_nneighbor = umap(gower_dist, input = "dist",n_neighbors = j, min_dist = 0.9)
+  plot(umap_EQ_damage_nneighbor$layout, xlab="X1", ylab="X2", col =EQ_damage_nepal$damage_grade)
+  mtext(paste0("n_neighbors = ",j))
+}
+```
+
+```{r Visualisierung_UMAP(min_dist), echo=TRUE ,warning=FALSE}
+
+# plotting different values for umap variable min_dist
+par(mfrow=c(3,3))
+
+for(j in c(0.05,0.1,0.3,0.5,0.6,0.75,0.8,0.9,0.99)){
+  umap_EQ_damage_mindist = umap(gower_dist, input = "dist",n_neighbors = 75, min_dist = j)
+  plot(umap_EQ_damage_mindist$layout, xlab="X1", ylab="X2", col =EQ_damage_nepal$damage_grade)
+  mtext(paste0("min_dist = ",j))
+}
+```
+
+Aufgrund der oben getesteten unterschiedlichen Werte für *n_neighbors* und *min_dist* wird die endgültige Dimensionsreduktion mit *n_neighbors = 115* und *min_dist = 0,8* durchgeführt. 
+
+```{r Visualisierung, echo=TRUE, fig.width=10}
+umap_EQ_damage = umap(gower_dist, input = "dist",n_neighbors = 115, min_dist = 0.8)
+
+umap_plot_dist = umap_EQ_damage$layout %>%
+  data.frame() %>%
+  setNames(c("X", "Y")) %>%
+  mutate(name = EQ_damage_nepal$building_id, damagegrade = EQ_damage_nepal$damage_grade)
+
+ggplot(aes(x = X, y = Y, color=damagegrade), data = umap_plot_dist) +
+  geom_point()
+
+```
+Wie in der obigen Abbildung zu sehen ist, bildet der Schadensgrad 5 eine deutliche Cluster aus den restlichen Daten. In dem obigen Cluster tendieren Schadensgrad 4 und ein Teil von Schadensgrad 3 dazu, einen Sub-Cluster zu bilden. Die ersten beiden Schadensgrade (1 und 2), die den Gebäuden mit den geringsten Schäden nach dem Erdbeben entsprechen, scheinen gemischt zu sein.
+
+
+### Task 3: Clustering
+
+Beim Clustering habe ich mich für die Methode PAM (Partitioning Around Medoids) entschieden. 
+
+Zunächst muss die Anzahl der Cluster bestimmt werden. Die Anzahl Cluster habe ich über mittlere Silhouttenbreite abgeschätzt, die auf 3 geschätzt wird. Es ist zu beachten, dass mittlere Silhouttenbreite kleiner als 0,5 ist, was ein Hinweis auf Schwache Strukturen ist und folglich weitere Analysen erfordern würde. Für dieses Projekt würde ich trotzdem mit drei Clustern fortfahren.
+
+```{r Clustering_Anzahl Cluster, fig.width=10}
+set.seed(8)
+sil_width_pam <- c(NA)
+for(i in 2:10){
+  pam_fit = pam(gower_dist, diss = TRUE, k = i)
+  sil_width_pam[i] = pam_fit$silinfo$avg.width
+}
+  sil_width_pam[1] = 0
+
+plot(1:10, sil_width_pam, 
+     xlab = "Anzahl der Cluster",
+     ylab = "Silhouttenbreite", typ ="o")
+```
+
+
+```{r Clustering_Partitioning Around Medoids, echo=TRUE, fig.width=10}
+set.seed(55)
+pam_fit = pam(gower_dist, diss = TRUE, k = 3)
+
+cluster_plot = umap_EQ_damage$layout %>%
+  data.frame() %>%
+  setNames(c("X", "Y")) %>%
+  mutate(cluster = factor(pam_fit$clustering))
+         
+ggplot(aes(x = X, y = Y), data = cluster_plot) +
+  geom_point(aes(color = cluster)) +
+  theme(legend.position = "none")
+```
+Wenn man diese Abbildung mit der obigen aus der Visualisierung der Dimensionsreduktion vergleicht, kann man feststellen, dass Gebäude, die durch das Erdbeben eingestürzt sind, einen Cluster (grün) bilden. Der rotfarbene Cluster gehört zu den Gebäuden, die schwere Schäden erleiden (Schadensgrad 3 und 4). Der dritte Cluster (bl) gehört zu den Gebäuden mit geringen Schäden durch das Erdbeben.  
+
+### Task 4: Klassifikation
+
+Für die Klassifikation habe ich Klassifikationsbäume und den Random Forest ausgewählt. Ziel ist es hier, Modelle zu erstellen, die den Schadensgrad von Gebäuden (Zielvariable) anhand der anderen 24 Features (*building_id* wird nicht berücksichtigt) vorhersagen können. 
+
+<br/>
+#### Klassifikationsbäume
+
+ich werde den Baum zuerst vollständig wachsen lassen.
+
+```{r Klassifikation1, echo=TRUE, warning=TRUE, message=TRUE, fig.width=10}
+dtree_data_building_structure = subset(EQ_damage_nepal, select = -c(building_id))
+ctrl = trainControl(method ="none")
+
+## Aufteilung in Training und Testdaten
+set.seed(30)
+index_training = createDataPartition(dtree_data_building_structure$damage_grade, p = 0.7, list = FALSE)
+dtree_training_set = dtree_data_building_structure[index_training,]
+dtree_test_set = dtree_data_building_structure[-index_training,]
+
+## vollständiger Baum
+dtree_complete = train(damage_grade ~., data=dtree_training_set,  method="rpart", trControl = ctrl, control = rpart.control(minsplit =2), tuneGrid=data.frame(cp=0))
+
+fancyRpartPlot(dtree_complete$finalModel)
+
+dtree_predict_test <- predict(dtree_complete, dtree_test_set)
+confusionMatrix(dtree_predict_test, reference = dtree_test_set$damage_grade)
+```
+
+In der obigen CunfusionMatrix ist zu erkennen, dass ausser dem Schadensgrad 5, für den das Modell eine gute Sensitivität hat, andere Schadensgrade nicht gut vorhergesagt werden. Im Folgenden werde ich versuchen zu sehen, ob das Pruning dem Modell hilft, Performance des Modells zu verbessern. 
+
+```{r Klassifikation2, echo=TRUE, warning=TRUE, message=TRUE, fig.width= 10}
+## Optimierung mittels Pruning
+set.seed(22)
+cl = trainControl(method = "repeatedcv", number =10, repeats = 3)
+dtree_prun = train(damage_grade ~. , data=dtree_training_set,  method="rpart", trControl = cl, control = rpart.control(minsplit =2), tuneGrid=data.frame(cp=seq(0,0.1,0.005)))
+
+plot(dtree_prun)
+
+fancyRpartPlot(dtree_prun$finalModel)
+
+dtree_predict_test_prun = predict(dtree_prun, dtree_test_set)
+confusionMatrix(dtree_predict_test_prun, reference = dtree_test_set$damage_grade)
+
+```
+
+Die Gesamtgenauigkeit des Modells und die Sensitivität für einige Schadensgrade steigt mit der Pruning, aber dies kommt auf Kosten der Nullsensitivität für Schadensgrad 2 und einer Abnahme der Sensitivität für Schadensgrad 3. 
+
+Ein Grund für ein solches Verhalten könnte die Unbalancierte Daten für den Schadensgrad sein. Zu Beginn wurde festgestellt, dass der Datensatz von Beobachtungen für Gebäude mit Schadensgrad 5 dominiert wird. 
+
+Ich werde im Random-Forest-Abschnitt prüfen, ob ein Down-Sampling der Daten die Modellperformance verbessern würde.
+
+<br/>
+#### Random Forest
+
+```{r Klassifikation3, echo=TRUE}
+set.seed(35)
+fitControl = trainControl(method = "oob")
+building_rf = train(damage_grade ~., data=dtree_training_set, method="rf", 
+                trControl = fitControl, tuneLength=5)
+
+plot(building_rf)
+plot(building_rf$finalModel)
+
+confusionMatrix(data=predict(building_rf, newdata=dtree_test_set),
+                reference=dtree_test_set$damage_grade)
+
+```
+
+Die Genauigkeit des Random-Forest-Modells ist ähnlich wie die der Klassifikationsbäume mit Pruning (0,63 vs. 0,64). Allerdings zeigt das Random-Forest-Modell eine viel bessere Sensitivität für die Schadensgrade. Die Klassifikation ist aber nicht für alle Klassen gleich gut. Bei gewissen Klassen ist die Sensitivität sehr gering (z.B. Klasse 2 und 3).
+
+<br/>
+#### Stratifiziertes Sampling
+
+```{r Stratifiziertes Sampling}
+set.seed(44)
+sample_size = min(table(dtree_training_set$damage_grade))
+
+rf_building_strat = train(damage_grade ~., data=dtree_training_set, method="rf",
+                       trControl = fitControl, tuneLength=5,
+                       strata=dtree_training_set$damage_grade, sampsize=rep(sample_size,5), ntree=500)
+
+pred_rf_strat <- predict(rf_building_strat, newdata = dtree_test_set)
+
+confusionMatrix(dat=pred_rf_strat, reference = dtree_test_set$damage_grade)
+```
+
+Durch ein stratifiziertes Sampling wird die Genauigkeit sehr geringfügig verbessert, was jedoch auf Kosten der Verringerung der Sensitivität für bestimmte Schadensgrade kommt. Dies zeigt, dass die unbalancierten Daten nicht die einzige Quelle für die niedrige Sensitivität für diese Schadensgrade sind (z.B. es gibt keine gute Variable für diese Gruppe). 
+<br/>
+#### Variable Importance
+```{r Variable_Importance1, warning=FALSE, message=FALSE, fig.width=10}
+set.seed(110)
+
+rfo <- ranger(damage_grade ~ ., data = dtree_training_set, importance = "impurity")
+vi_rfo = data.frame(rfo$variable.importance)
+
+vi_rfo = vi_rfo/max(vi_rfo)
+barplot(vi_rfo[order(vi_rfo[,1],decreasing=TRUE),], horiz = TRUE, space = 0.1, las = 1, names.arg = row.names(vi_rfo), cex.names = 0.5)
+```
+
+Die wichtigsten Variablen scheinen *count_floors_pre_eq* und *count_floors_diff_ratio* zu sein. Ich würde gerne die Wichtigkeit dieser Variablen für jede Level der Zielvariable *damage_grade* überprüfen.
+
+```{r Variable_Importance2, warning=FALSE, message=FALSE, fig.width=10}
+set.seed(2021)
+class <- levels(dtree_training_set$damage_grade)
+ice_curves <- lapply(class, FUN = function(class){
+  res_part <- partial(rf_building_strat,  pred.var = "count_floors_diff_ratio", 
+                      prob=TRUE, which.class=class, type="classification", ice = TRUE)
+  res_part$yhat.id <- as.factor(res_part$yhat.id)
+  dat_agg <- aggregate(yhat~count_floors_diff_ratio, data=res_part, FUN=mean)
+  ggplot(res_part, aes(x=count_floors_diff_ratio, y=yhat, group=yhat.id))+
+    geom_line() +
+    theme_light()+
+    geom_line(data=dat_agg, aes(x=count_floors_diff_ratio, y=yhat),
+              group=1, color="red", size=1.5)+
+    ggtitle(class)+
+    ylim(c(0,1)) +
+    theme_light()
+})
+grid.arrange(grobs = ice_curves, ncol = 3)
+```
+
+Man sieht schön, dass *count_floors_diff_ratio* insbesondere für die Klasse class_5 wichtig ist. Steigt der Wert vom *count_floors_diff_ratio* über 1, nimmt die Wahrscheinlichkeit für *damage_grade* zur Klasse 5 zu gehören stark zu. Weitere Klassen ausser Klasse 4 werden mit diesem Feature nicht klar aufgetrennt.
